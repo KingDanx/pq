@@ -15,6 +15,7 @@ import (
 	"net"
 	"os"
 	"os/user"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -22,6 +23,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/alexbrainman/sspi/negotiate"
 	"github.com/lib/pq/oid"
 	"github.com/lib/pq/scram"
 )
@@ -232,8 +234,7 @@ func (cn *conn) handlePgpass(o values) {
 	if _, ok := o["password"]; ok {
 		return
 	}
-	// Get passfile from the options
-	filename := o["passfile"]
+	filename := os.Getenv("PGPASSFILE")
 	if filename == "" {
 		// XXX this code doesn't work on Windows where the default filename is
 		// XXX %APPDATA%\postgresql\pgpass.conf
@@ -436,10 +437,8 @@ func dial(ctx context.Context, d Dialer, o values) (net.Conn, error) {
 func network(o values) (string, string) {
 	host := o["host"]
 
-	// UNIX domain sockets are either represented by an (absolute) file system
-	// path or they live in the abstract name space (starting with an @).
-	if filepath.IsAbs(host) || strings.HasPrefix(host, "@") {
-		sockPath := filepath.Join(host, ".s.PGSQL."+o["port"])
+	if strings.HasPrefix(host, "/") {
+		sockPath := path.Join(host, ".s.PGSQL."+o["port"])
 		return "unix", sockPath
 	}
 
@@ -1270,6 +1269,19 @@ func (cn *conn) auth(r *readBuf, o values) {
 
 		// Store for GSSAPI continue message
 		cn.gss = cli
+	case 9: // GSSAPI, startup
+		creds, err := negotiate.AcquireCurrentUserCredentials()
+		if err != nil {
+			fmt.Println(err)
+		}
+		_, token, err := negotiate.NewClientContext(creds, "")
+		if err != nil {
+			fmt.Println(err)
+		}
+
+		w := cn.writeBuf('p')
+		w.bytes(token)
+		cn.send(w)
 
 	case 8: // GSSAPI continue
 
@@ -2040,8 +2052,6 @@ func parseEnviron(env []string) (out map[string]string) {
 			accrue("user")
 		case "PGPASSWORD":
 			accrue("password")
-		case "PGPASSFILE":
-			accrue("passfile")
 		case "PGSERVICE", "PGSERVICEFILE", "PGREALM":
 			unsupported()
 		case "PGOPTIONS":
